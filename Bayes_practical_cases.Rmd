@@ -1,7 +1,7 @@
 ---
 title: "Praktična uporaba Bayesove statistike"
 author: "Gregor Vavdi"
-date: "3/4/2020"
+date: "8/3/2020"
 output: pdf_document
 ---
 
@@ -19,7 +19,6 @@ library(ggplot2)
 dt <- readRDS("data/podatkiRAK.RDS")
 samples <- readRDS("data/HieMod.RDS")
 samples.thinning <- readRDS("data/HieMod_thinning.RDS")
-samples.mixing <- readRDS("data/HieMod_vec_verig.RDS")
 dt$RefIso <- factor(dt$RefIso,labels = c("Glava", "Vrat"))
 povprecje.pacientov <- dt %>% group_by(AnonId) %>% summarise(st.frakcij = n()) 
 podatki.st.frakcij <- dt %>% left_join(povprecje.pacientov,by = c("AnonId")) 
@@ -130,7 +129,7 @@ plot(b.Vrt, type = "l", main = "Koeficient za stevilo frakcij, veriga",
      xlab = "")
 plot(b.Lat, type = "l", main = "Koeficient za stevilo frakcij, veriga",
      xlab = "")
-plot(b.refIso, type = "l", main = "Koeficient za vrsto raka, veriga",
+plot(b.RefIso, type = "l", main = "Koeficient za vrsto raka, veriga",
      xlab = "")
 
 ```
@@ -145,8 +144,8 @@ hist(b.Vrt, prob = T, main = "Koeficient za premike v vertikalni smeri,\nrobna a
 lines(density(b.Vrt), col = "red", lwd = 2)
 hist(b.Lat, prob = T, main = "Koeficient za premike horizontalni smeri, \nrobna aposteriorna porazdelitev")
 lines(density(b.Lat), col = "red", lwd = 2)
-hist(b.refIso, prob = T, main = "Koeficient za vrsto raka, \nrobna aposteriorna porazdelitev")
-lines(density(b.refIso), col = "red", lwd = 2)
+hist(b.RefIso, prob = T, main = "Koeficient za vrsto raka, \nrobna aposteriorna porazdelitev")
+lines(density(b.RefIso), col = "red", lwd = 2)
 ```
 
 
@@ -197,7 +196,7 @@ Določil sem tudi parametre hiperapriornih porazdelitev:
 
 ```{r nimbleCode}
 code <- nimbleCode({
-  mu ~ dnorm(0, sd = 10);
+  mu ~ dnorm(0, sd = 1);
   eta ~ dunif(0, 100)
   sigma ~ dunif(0, 100)
 
@@ -223,16 +222,13 @@ inits <- list(mu = mean(pod.Lng$povprecje),
               muGroups = pod.Lng$povprecje)
 
 data <- list(y = xMatrix)
-
 Rmodel <- nimbleModel(code = code, constants = constants,
                       inits = inits, data = data)
 Rmodel$initializeInfo()
-
 conf <- configureMCMC(Rmodel)
 #conf$printSamplers()
 #conf$printMonitors()
 conf$addMonitors('muGroups')
-
 Rmcmc <- buildMCMC(conf)
 Cmodel <- compileNimble(Rmodel)
 Cmcmc <- compileNimble(Rmcmc, project = Cmodel)
@@ -268,7 +264,7 @@ acf(samples[,118])
 
 Kot vidimo so podatki v MCMC verigi visoko korelirani, zato moramo uporabiti thinning. Koliko vrednosti bomo spusitli vmes je odvisno od podatkov, zato sem to storil s poskušanjem. Na koncu sem se odločil za 300 in se s tem rešil avtokorelacije. (Ne vem ali je to prevelika številka v praksi in bi moral drugače postopati).
 
-Na novo definiramo model in temu primerno povečamo število iteracij in burn-in.
+Na novo sem definiramo model in temu primerno povečamo število iteracij in burn-in.
 
 ```{r HiModelThinning, eval=FALSE, message=FALSE, warning=FALSE}
 samples.thinning <- samples <- runMCMC(Cmcmc, niter = 120000, nburnin = 20000, thin =300)
