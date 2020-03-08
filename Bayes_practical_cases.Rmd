@@ -1,0 +1,377 @@
+---
+title: "Praktična uporaba Bayesove statistike"
+author: "Gregor Vavdi"
+date: "3/4/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(R2BayesX)
+library(dplyr)
+library(car)
+library(kableExtra)
+library(nimble)
+library(basicMCMCplots)
+library(coda)
+library(ggplot2)
+dt <- readRDS("data/podatkiRAK.RDS")
+samples <- readRDS("data/HieMod.RDS")
+samples.thinning <- readRDS("data/HieMod_thinning.RDS")
+samples.mixing <- readRDS("data/HieMod_vec_verig.RDS")
+dt$RefIso <- factor(dt$RefIso,labels = c("Glava", "Vrat"))
+povprecje.pacientov <- dt %>% group_by(AnonId) %>% summarise(st.frakcij = n()) 
+podatki.st.frakcij <- dt %>% left_join(povprecje.pacientov,by = c("AnonId")) 
+```
+
+
+
+# Podatki
+
+Podatke sem pridobil za namene Statističnega svetovanja, ki ga opravljam na Onkološkem inštitu v Ljubljani. Raziskovalca zanima varnostni pas pri obsevanju z radioterapijo. Vsak pacient je deležen svojega obsevalnega načrta, ki zajema različno število frakcij (obsevanje). Teh frakcij je lahko do 35.  Pri obsevanju se pacient postavi na mizo, kjer ga s pomočjo slik skalibirajo na teoretično pravilen položaj. Ker pa človek ni togo telo, se vseskozi premika (dihanje, napete mišice, itd.). Zato v ta namen gledajo premike v x, y in z smeri, ki so se zgodili v času ene frakcije od teoretične postavitve, ki bi jo moral pacient dosegati. Ti premiki po oseh določajo varnostni pas obsevanja, da pacientov tumor vseeno v celoti obsevan. Imenujemo jih interfrakcijski razmiki.
+
+V prvem delu se bom osredotočil kaj vpliva na  translacijske premike po y-osi (`Lng`). Neodvisne spremenljivke, ki jih bom vključil v model sta: vrsta raka in število frakcij. Model se mi zdi smiseln, saj me zanima ali vrsta raka dejansko pomeni večje translacijske premike pri radioterapiji (pri kateri vrsti raka, se pacienti bolj premikajo) in ali število obsevanj vpliva na napako. Translacij `Vrt` in `Lat`, ter rotacije v model nisem dodajal v model, saj ne gre za neodvisne spremenljivke. Predpostavljam, da se pacient ne more premakniti samo po eni osi.
+
+```{r, echo = FALSE}
+kable(head(dt), "markdown")
+```
+
+## Vrsta raka
+
+```{r VrstaRaka , echo = FALSE, fig.width=5, fig.height=4,fig.align="center"}
+vrsta <- prop.table(table(dt$RefIso))*100
+bp <- barplot(vrsta, main = "Relativna frekvenca vrste raka", 
+        ylim= c(0,100))
+text(bp, vrsta/2, labels = paste(round(vrsta, digits = 2), "%", sep =""))
+
+```
+
+V podatkovju imamo 115 pacientov, ki je skupaj opravilo 3393 obsevanj z radioterapijo. 64 \% je imelo raka v glavi, ostali pa na vratu. Obsevanje je potekalo od septembra 2012 do marca 2015.
+
+
+## Število frakcij
+
+```{r PorazdelitevFrakcij, echo = FALSE, fig.width=6, fig.height=4,fig.align="center"}
+hist(povprecje.pacientov$st.frakcij, breaks = 10, probability = F, main = "Porazdelitev stevila frakcij", xlim = c(0, 35), xlab = "Stevilo frakcij", ylab = "Frekvenca")
+```
+
+Za porazdelitev števila frakcij med pacienti, ki velja za ključno v mojem problemu, je na vzorcu vidna ena velika skupina, ki obsega 84 \% pacientov, ki ima med 25 in 35 frakcij. Skoraj 10 \% pacientov ima število obsevanj med 15 in 25, medtem ko ima le 6 \% pacientov od 1 do 15 obsevanj.
+
+# Translacije in rotacije pacientov
+
+```{r TransRotac, echo = FALSE, fig.width=10, fig.height=7,fig.align="center"}
+par(mfrow = c(2,2))
+hist(dt$Vrt, breaks = 15, probability = T, main = "Porazdelitev premikov po x-osi", xlab = "Napaka", ylab = "Verjetnost")
+lines(density(dt$Vrt), col = "red", lwd = 2)
+hist(dt$Lng, breaks = 15, probability = T, main = "Porazdelitev premikov po y-osi", xlab = "Napaka", ylab = "Verjetnost")
+lines(density(dt$Lng), col = "red", lwd = 2)
+hist(dt$Lat, breaks = 15, probability = T, main = "Porazdelitev premikov po z-osi", xlab = "Napaka", ylab = "Verjetnost")
+lines(density(dt$Lat), col = "red", lwd = 2)
+hist(dt$Rtn, breaks = 25, probability = T, main = "Porazdelitev rotacij", xlab = "Napaka", ylab = "Verjetnost")
+lines(density(dt$Rtn), col = "red", lwd = 2)
+```
+
+
+```{r echo=FALSE, paged.print=TRUE}
+
+r <- round(as.data.frame(psych::describe(dt[,c("Vrt", "Lng", "Lat", "Rtn")]))[,c(2,3,4,5,8,9,11, 12)],2)
+kable(r, format ="markdown")
+
+```
+
+Porazdelitve po oseh so normalno porazdeljene s precej podobnim povprečji. Pri porazdelitvi rotacij ne moremo trditi, da je spremenljivka normalno porazdeljena, saj je prevelik del vrednosti okoli 0, ostale vrednosti pa so minimalno prisotne v negativno in pozitivno smer.
+
+
+
+# Frekventistični model
+
+
+```{r}
+lm.mod <- lm(Lng ~ Vrt + Lat + RefIso, data = podatki.st.frakcij)
+summary(lm.mod)
+```
+
+```{r, echo = FALSE, fig.width=10, fig.height=7,fig.align="center"}
+par(mfrow = c(2,2))
+plot(lm.mod)
+```
+
+Predpostavka o konstantni varianci je izpolnjena, problematični so morda ostanki, ki ne kažejo, da so normalno porazdeljeni. Vseeno bom nadaljeval z analizo.
+
+Pregledam še kolinearnost obeh spremenljivk in vidim, da kolinearnost ni prisotna.
+```{r}
+kable(vif(lm.mod), "markdown", col.names = "VIF")
+```
+
+Pregledali smo osnovne karakteristike linearnega modela, ki jih smatram, da jih moramo narediti, tudi če se odlčamo za Bayesovo statistiko.
+
+# Bayesev model
+
+```{r}
+fit2.bayesx <- bayesx(Lng ~ Vrt+ Lat + RefIso , 
+                      data = podatki.st.frakcij, 
+                      family = "gaussian", method = "MCMC", iterations = 12000,
+                      burnin = 2000)
+
+b.Vrt <- attr(fit2.bayesx$fixed.effects, "sample")[,2]
+b.Lat <- attr(fit2.bayesx$fixed.effects, "sample")[,3]
+b.RefIso <- attr(fit2.bayesx$fixed.effects, "sample")[,4]
+
+summary(fit2.bayesx)
+```
+
+
+## Konvergenca
+
+```{r konvergencaPlot, fig.width=6, fig.height=6,fig.align="center"}
+par(mfrow = c(2, 2))
+plot(b.Vrt, type = "l", main = "Koeficient za stevilo frakcij, veriga",
+     xlab = "")
+plot(b.Lat, type = "l", main = "Koeficient za stevilo frakcij, veriga",
+     xlab = "")
+plot(b.refIso, type = "l", main = "Koeficient za vrsto raka, veriga",
+     xlab = "")
+
+```
+
+Konvergence za vse parametre je v skladu z dovoljenim. 
+
+## Interpretacija
+
+```{r PosteriornaPorazdPlot, fig.width=8, fig.height=5,fig.align="center"}
+par(mfrow = c(2, 2))
+hist(b.Vrt, prob = T, main = "Koeficient za premike v vertikalni smeri,\nrobna aposteriorna porazdelitev")
+lines(density(b.Vrt), col = "red", lwd = 2)
+hist(b.Lat, prob = T, main = "Koeficient za premike horizontalni smeri, \nrobna aposteriorna porazdelitev")
+lines(density(b.Lat), col = "red", lwd = 2)
+hist(b.refIso, prob = T, main = "Koeficient za vrsto raka, \nrobna aposteriorna porazdelitev")
+lines(density(b.refIso), col = "red", lwd = 2)
+```
+
+
+Levi graf zgoraj prikazuje porazdelitev za koeficient $\beta_1$, ki določa efekt za spremenljivko `Vrt`. Povprečje porazdelitve je  -0.1372, 95 \% interval pa je med  -0.1634 in  -0.1110. Spremenljivka `Lat`, ki je skrita pod koeficient $\beta_2$ ima normalno porazdelitev s povprečjem 
+-0.0895, 95 \% interval med -0.1237 in -0.0571. Spremenljivka `RefIso`, ki določajo vrsto raka. Njen pripadajoči parameter $\beta_3$ je porazdeljen normalno, s povprečjem 0.0313, njen 95 \% interval pa je med  0.0146 - 0.0479.
+
+Ob upoštevanju `Vrt` in `Lat` v modelu je `Lng` za paciente z rakom na vratu za 0.0313 enote, kot tiste z rakom v glavi. Ob upoštevanju vrednosti z  `RefIso` in `Lat` velja: če se premik v vertikalni smeri poveča za 1 se `Lng` v povprečju zmanjša za 0.1372. Ob upoštevanju vrednosti z  `RefIso` in `Vrt` velja: če se premik v horizontalni smeri (Lat) poveča za 1 se `Lng` v povprečju zmanjša za 0.0895.
+
+
+# Hierarhični model
+
+Hierarhičen model sem definiral na naslednji način. Zanimala me bo spremenljivka `Lng`, glede na paciente, in kako se razlikuje med njimi. Pri tem bom naredil pogumno predpostavko o tem, da je varianca med posameznimi pacienti enaka. Podatke imamo za 115 pacientov, vsak od njih pa ima do 35 merjenj.
+
+
+```{r}
+pod.Lng <- dt %>%
+  group_by(AnonId) %>%
+  summarise(povprecje = mean(Lng), n=length(Lng), varianca = var(Lng))
+
+```
+
+
+```{r, fig.width=6, fig.height=4,fig.align="center"}
+ggplot(dt, aes(x = AnonId, y = Lng, group = AnonId))+
+  stat_summary(fun.ymin = min, fun.ymax = max, fun.y = mean) + 
+  theme(axis.text.x =element_text(color = "white"))+
+  labs(x = "Pacienti", y = "Premik" )+
+  ggtitle("Povprecja premikov pacientov v longitudinalni smeri")
+```
+
+```{r}
+m <- length(pod.Lng$AnonId)
+n <- pod.Lng$n
+ime.unique <- levels(dt$AnonId)
+
+xMatrix <- matrix(NA, ncol = m, nrow = max(n))
+for (j in 1:m) {
+  xMatrix[1:n[j],j] <- dt[dt$AnonId == ime.unique[j],]$Lng - mean(dt[dt$AnonId == ime.unique[j],]$Lng) #centriramo
+}
+```
+
+Določil sem tudi parametre hiperapriornih porazdelitev:
+\begin{align*}
+\sigma^2 &\sim \text{Inv-Gama}(\nu_0 / 2, \sigma_0^2 \nu_0 / 2), \\
+\mu &\sim \mathcal{N}(\mu_0, \tau_0^2), \\
+\eta^2 &\sim \text{Inv-Gama}(\kappa_0 / 2, \eta_0^2 \kappa_0 / 2).
+\end{align*}
+
+```{r nimbleCode}
+code <- nimbleCode({
+  mu ~ dnorm(0, sd = 10);
+  eta ~ dunif(0, 100)
+  sigma ~ dunif(0, 100)
+
+  for (j in 1:m) {
+    muGroups[j] ~ dnorm(mu, sd = eta)
+    for (i in 1:n[j]) {
+      y[i, j] ~ dnorm(muGroups[j], sd = sigma);
+    }
+  }
+})
+```
+
+Ker je želja, da bi bili premiki med opazovanjem čim manjši, kar pomeni, da je pričakovana vrednost radioterapije enaka 0. Za standardni odklon sem preizkusil več vrednosti, nato sem se odločil za 1. Med podatki ni nikoli vrednosti višje od 2, vednar sem želel biti previden in si nisem želel preveč omejevati.
+Parametra $\eta$ in $\sigma$ sem vzorčil iz enakomerne porazdelitve 0 - 10. Pri tem sem poskusil, tudi širše intervale, vendar so se mi tukaj rezultati zdeli najbolj optimalni.
+
+
+```{r HieModel, eval=FALSE, message=FALSE, warning=FALSE}
+constants <- list(m = m, n = n)
+
+inits <- list(mu = mean(pod.Lng$povprecje),
+              eta = sd(pod.Lng$povprecje),
+              sigma = mean(sqrt(pod.Lng$varianca)),
+              muGroups = pod.Lng$povprecje)
+
+data <- list(y = xMatrix)
+
+Rmodel <- nimbleModel(code = code, constants = constants,
+                      inits = inits, data = data)
+Rmodel$initializeInfo()
+
+conf <- configureMCMC(Rmodel)
+#conf$printSamplers()
+#conf$printMonitors()
+conf$addMonitors('muGroups')
+
+Rmcmc <- buildMCMC(conf)
+Cmodel <- compileNimble(Rmodel)
+Cmcmc <- compileNimble(Rmcmc, project = Cmodel)
+samples <- runMCMC(Cmcmc, niter = 12000, nburnin = 2000 )
+#saveRDS(samples, "data/HieMod.RDS")
+```
+
+
+## Konvergenca
+Najprej sem preučil konvergenco parametrov in naključno izbranega pacienta.
+
+```{r}
+par(mfrow = c(2,2))
+plot(samples[,2], type = "l", main = "mu")
+plot(samples[,44], type = "l", main = "Pacient 42")
+plot(samples[,1], type = "l", main = "eta")
+plot(samples[,118], type = "l", main = "sigma")
+```
+
+Z konvergenco izgleda vse ok, saj so vrednosti na y-osi dovolj male. Pozorni moramo biti, saj so vrednosti merjenja majhne in da ne pride do prevelikih odstopanj.
+
+## Thinning
+
+Ker v MCMC verigah prevladuje visoka stopnja avtokorelacije, zato je potrebna analiza tudi v mojem primeru.
+
+```{r, fig.width=6, fig.height=4,fig.align="center"}
+par(mfrow = c(2,2))
+acf(samples[,2], main = "mu")
+acf(samples[,44])
+acf(samples[,1])
+acf(samples[,118])
+```
+
+Kot vidimo so podatki v MCMC verigi visoko korelirani, zato moramo uporabiti thinning. Koliko vrednosti bomo spusitli vmes je odvisno od podatkov, zato sem to storil s poskušanjem. Na koncu sem se odločil za 300 in se s tem rešil avtokorelacije. (Ne vem ali je to prevelika številka v praksi in bi moral drugače postopati).
+
+Na novo definiramo model in temu primerno povečamo število iteracij in burn-in.
+
+```{r HiModelThinning, eval=FALSE, message=FALSE, warning=FALSE}
+samples.thinning <- samples <- runMCMC(Cmcmc, niter = 120000, nburnin = 20000, thin =300)
+#saveRDS(samples.thinning, "data/HieMod_thinning.RDS")
+```
+
+in najprej pogledamo thinning:
+
+```{r, fig.width=6, fig.height=4,fig.align="center"}
+par(mfrow = c(2,2))
+acf(samples.thinning[,2], main = "mu")
+acf(samples.thinning[,44], main = "mu_42")
+acf(samples.thinning[,1], main = "eta")
+acf(samples.thinning[,118], main = "sigma")
+```
+
+Še vedno ni videti vredu, saj nekateri saj so ostanki po lagih še vedno večji od 95 \% intervala zaupanja, ki je narisan s črtkano črto. Vseeno nadaljujem z analizo.
+
+Še enkrat sem pogledal konvergenco za končni model (s thinningom):
+
+```{r, fig.width=4, fig.height=2,fig.align="center"}
+samplesPlot(samples.thinning, var = c("mu","muGroups[42]"))
+kable(samplesSummary(samples.thinning)[c(2, 44), ], "markdown")
+```
+
+Glede na skalo, ki je na y-osi, bi rekel, da je konvergenca spremenljiva, čeprav graf od daleč zgleda da zelo variara.
+
+```{r, fig.width=4, fig.height=2,fig.align="center"}
+samplesPlot(samples.thinning, var = c("eta","sigma"))
+kable(samplesSummary(samples.thinning)[c(1, 118), ], "markdown")
+```
+
+Za parametra $\sigma$ in $\eta$ je konvergenca vredu. Posteriorne porazdelitve $\eta$ dosegajo vrednosti zelo blizu, medtem ko porazdelitev parametra $\sigma$ malce odmaknjena od 0, s povprečjem 0.15.
+
+## Efective size in standardna napaka
+
+```{r}
+efektivni.vzorec<- effectiveSize(samples.thinning)
+moj.efect.vzorec <- efektivni.vzorec[c(1,2,44,118)]
+sd.vzorec <- apply(samples.thinning[,c(1,2,44,118)], 2, sd)
+standardne.napake <- sapply(1:4, function(i){sd.vzorec[i]/sqrt(moj.efect.vzorec[i])})
+
+kable(data.frame("Effective size" = moj.efect.vzorec, "Standardna napaka" = standardne.napake), "markdown")
+```
+
+Efektivna velikost vzorca se giblje okoli 100 za posameznega pacienta. Za hiper parameter $\sigma$ pa okoli 333. Standardne napake so za vse parametre zelo majhne, kar je dober znak za model.
+
+
+## Marginalne aposteriorne porazdelitve
+
+```{r MarginalnePorazd, fig.width=6, fig.height=4,fig.align="center"}
+par(mfrow=c(2, 2))
+plot(density(samples.thinning[ , 2]), type = "l", main = "mu")
+abline(v = quantile(samples.thinning[ , 2], prob=c(0.025, 0.5, 0.975)), lty = 2)
+plot(density(samples.thinning[ , 1]**2), type = "l", main = "eta2")
+abline(v = quantile(samples.thinning[ , 1]**2, prob=c(0.025, 0.5, 0.975)), lty = 2)
+plot(density(samples.thinning[ , 44]), type = "l", main = "mu_42")
+abline(v = quantile(samples.thinning[ , 3], prob=c(0.025, 0.5, 0.975)), lty = 2)
+plot(density(samples.thinning[ , 118]**2), type = "l", main = "sigma2")
+abline(v = quantile(samples.thinning[ , 118]**2, prob=c(0.025, 0.5, 0.975)), lty = 2)
+
+```
+
+Model za parameter $\mu$ daje zelo optimistične napovedi, saj pravi, da bo skupno povprečje vseh pacientov znašalo zelo blizu 0. Paramater $\eta$ je zelo blizu 0. 95 \% interval zaupnja za $\sigma^2$ je 0.022 in 0.248, kar kaže na to, da bodo odstopanja od povprečja zelo majhne pri vseh pacientih v modelu. Tako se izkaže tudi pri primeru enega od pacientov, ki ima povprečje pri 0.0003.
+
+
+Posebaj sem pogledal primer za dva pacienta. Izbrana sta pacienta, ki sta imela največjo in najmanjšo razliko med vzorčnim povprečj in 0. To sta: največjo (76. pacient) in najmanjšo (92.pacient).
+
+```{r dvaPacienta,  fig.width=6, fig.height=4,fig.align="center"}
+plot(density(samples.thinning[,19]), type="l", main="")
+points(pod.Lng[19,]$povprecje, 2, pch=16, cex=1.5, col="red")
+abline(v = mean(samples.thinning[,19]), lty=2)
+lines(density(samples.thinning[,44]), type="l", col="red")
+points(pod.Lng[44,]$povprecje, 2, pch=16, cex=1.5, col="red")
+abline(v = mean(samples.thinning[,44]), lty=2, col="red")
+abline(v = mean(samples.thinning[,2]), lty=2, col="green3")
+legend("topleft", c("92. pacient", "njeno vz. povp.", "njen E(apost)", 
+                    "76. pacient", "njeno vz. povp.", "njen E(apost)"), 
+       col=c("black","black","black","red","red","red"), lty=c(1,NA,2,1,NA,2), 
+       pch=c(NA,16,NA,NA,16,NA))
+```
+ 
+Posteriorni porazdelitvi se nekoliko razlikjueta, njuna modelska povprečja $\mu_43$ in $\mu_6$ omejujeta modelsko skupno poveprečje (zelena črtkana črta). Vzorčno povprečje za $\mu_43 = 0.7$ je tako daleč stran, modelske napovedi, da ju na grafu ni mogoče narisati.
+
+```{r, fig.width=6, fig.height=4,fig.align="center"}
+pod.Lng$EMuGroup <- colMeans(samples.thinning[,3:117])
+
+par(mfrow=c(1,2))
+plot(pod.Lng$povprecje, pod.Lng$EMuGroup,
+     xlab = "vzorcno povprecje", ylab = expression(E(mu_j)))
+abline(a = 0, b = 1)
+
+plot(pod.Lng$n, pod.Lng$povprecje - pod.Lng$EMuGroup,
+     xlab = "velikost vzorca sole", 
+     ylab = expression(paste("vzorcno povprecje - "," ",E(mu_j), sep="")))
+abline(h = 0)
+```
+
+Na levi sliki je predstavljeno pričakovana vrednost model za vsakega pacienta v primerjavi z vzorčnim povprečjem vsakega pacienta. Sam menim, da model ne predstavlja dobro podatkov, saj o ocenjuje napako zelo blizu 0 (povečanje apriorne porazdelitve ne pomaga kaj dosti), vzorčna pa se raztezajo od -0.2 do 0.8. Črta predstavlja kako dobro se vzorčna povprečja ujemajo z modelom.
+
+Desna slika predstavlja vpliv velikosti vzorca na razliko vzorčnege poveprečja j-tega pacienta z njegovo pričakovano vrednostjo modela. Vidimo, da je število obsevanj ne vpliva na minimiziranje razlik med podatki in modelom. To je seveda logična posledica, saj so merjenja med seboj popolnoma neodivsna in več merjenj ne bo dalo manjših premikov pacienta. Po drugi strani pa pacienta med obsevanji večkrat slikajo in nato prilagodijo njegov novi položaj, kar posledično pomeni, da bi se napaka morala zmanjševat. Vendar podatkov o tem, kdaj mu na novo izračunajo položaj nimam.
+
+Zakaj je prišlo do tega? Po mojem mnenju zato, ker sem model gradil na osnovni predpostavki, da so variance med pacienti enake. Mislim, da je to glavni razlog zakaj se modelske napovedi ne ujemajo z vzorčnimi povprečji.  
+
+
+
